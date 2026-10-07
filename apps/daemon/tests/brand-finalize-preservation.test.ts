@@ -89,8 +89,11 @@ describe('brand finalize preserves user-owned files (#8144)', () => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  async function setup() {
+  // `draft` starts the way `POST /api/brands` does: a draft design system is
+  // registered up front and the programmatic pass runs, here harvesting nothing.
+  async function setup({ draft = false }: { draft?: boolean } = {}) {
     const db = openDatabase(tempDir, { dataDir: tempDir });
+    let programmaticPass: Promise<unknown> = Promise.resolve();
     const started = await startBrandExtraction({
       url: 'acme.com',
       brandsRoot,
@@ -100,7 +103,17 @@ describe('brand finalize preserves user-owned files (#8144)', () => {
       logoFallback: NO_LOGO_FALLBACK,
       seedFallback: NO_SEED_FALLBACK,
       imageryFallback: NO_IMAGERY_FALLBACK,
+      ...(draft
+        ? {
+            userDesignSystemsRoot,
+            prefetch: async () => null,
+            onBackgroundExtraction: (settled: Promise<unknown>) => {
+              programmaticPass = settled;
+            },
+          }
+        : {}),
     });
+    await programmaticPass;
     const projectDir = path.join(projectsRoot, started.projectId);
     const writeBrandJson = (brand: Brand) =>
       writeFileSync(
@@ -119,7 +132,7 @@ describe('brand finalize preserves user-owned files (#8144)', () => {
         logoFallback: NO_LOGO_FALLBACK,
         imageryFallback: NO_IMAGERY_FALLBACK,
       });
-    return { projectDir, writeBrandJson, finalize };
+    return { started, projectDir, writeBrandJson, finalize };
   }
 
   function dsDir(designSystemId: string): string {
@@ -178,6 +191,77 @@ describe('brand finalize preserves user-owned files (#8144)', () => {
     // The project copy was not touched, so it follows the new generation.
     expect(readFileSync(path.join(projectDir, 'DESIGN.md'), 'utf8')).toContain('Cobalt');
     expect(readFileSync(path.join(projectDir, 'system', 'variables.css'), 'utf8')).not.toContain('hand edit');
+  });
+
+  it('replaces the draft placeholder DESIGN.md on the first finalize', async () => {
+    const { started, projectDir, writeBrandJson, finalize } = await setup({ draft: true });
+    const designMd = path.join(dsDir(started.designSystemId ?? ''), 'DESIGN.md');
+    expect(readFileSync(designMd, 'utf8')).not.toContain('Terracotta');
+
+    writeBrandJson(VALID_BRAND);
+    const first = await finalize();
+
+    expect(first.designSystemId).toBe(started.designSystemId);
+    expect(readFileSync(designMd, 'utf8')).toContain('Terracotta');
+    expect(readFileSync(designMd, 'utf8')).toBe(readFileSync(path.join(projectDir, 'DESIGN.md'), 'utf8'));
+
+    // From here on it is an ordinary generated file: refreshed until hand-edited.
+    writeBrandJson(RECOLORED_BRAND);
+    await finalize();
+    expect(readFileSync(designMd, 'utf8')).toContain('Cobalt');
+    writeFileSync(designMd, '# Hand-written DESIGN.md\n\n', 'utf8');
+    writeBrandJson(VALID_BRAND);
+    await finalize();
+    expect(readFileSync(designMd, 'utf8')).toBe('# Hand-written DESIGN.md\n\n');
+  });
+
+  it('keeps a draft DESIGN.md the user edited before the first finalize', async () => {
+    const { started, writeBrandJson, finalize } = await setup({ draft: true });
+    const designMd = path.join(dsDir(started.designSystemId ?? ''), 'DESIGN.md');
+    writeFileSync(designMd, '# Hand-written DESIGN.md\n\n', 'utf8');
+
+    writeBrandJson(VALID_BRAND);
+    await finalize();
+
+    expect(readFileSync(designMd, 'utf8')).toBe('# Hand-written DESIGN.md\n\n');
+  });
+
+  // A finalize stopped midway leaves its brand.json in the brand workspace.
+  for (const fingerprinted of [true, false]) {
+    const draft = fingerprinted ? 'draft placeholder' : 'placeholder of a draft with no fingerprint';
+    it(`replaces the ${draft} after a finalize that stopped before the design system`, async () => {
+      const { started, writeBrandJson, finalize } = await setup({ draft: true });
+      const dir = dsDir(started.designSystemId ?? '');
+      if (!fingerprinted) rmSync(path.join(dir, '.od-generated.json'), { force: true });
+      writeFileSync(
+        path.join(brandsRoot, started.id, 'brand.json'),
+        JSON.stringify({ ...RECOLORED_BRAND, sourceUrl: started.sourceUrl }, null, 2),
+        'utf8',
+      );
+
+      writeBrandJson(VALID_BRAND);
+      await finalize();
+
+      expect(readFileSync(path.join(dir, 'DESIGN.md'), 'utf8')).toContain('Terracotta');
+    });
+  }
+
+  it('keeps a hand-edited DESIGN.md after a finalize that stopped past the design system', async () => {
+    const { started, writeBrandJson, finalize } = await setup({ draft: true });
+    const designMd = path.join(dsDir(started.designSystemId ?? ''), 'DESIGN.md');
+    writeBrandJson(VALID_BRAND);
+    await finalize();
+    // Simulate a finalize that mirrored the bundle but stopped before recording completion.
+    const metaFile = path.join(brandsRoot, started.id, 'meta.json');
+    const meta = JSON.parse(readFileSync(metaFile, 'utf8')) as Record<string, unknown>;
+    delete meta.systemFiles;
+    writeFileSync(metaFile, JSON.stringify(meta), 'utf8');
+    writeFileSync(designMd, '# Hand-written DESIGN.md\n\n', 'utf8');
+
+    writeBrandJson(RECOLORED_BRAND);
+    await finalize();
+
+    expect(readFileSync(designMd, 'utf8')).toBe('# Hand-written DESIGN.md\n\n');
   });
 
   it('still refreshes untouched files on the first re-finalize of a legacy brand with no manifest', async () => {

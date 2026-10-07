@@ -29,6 +29,7 @@ import type {
 } from '@open-design/contracts';
 
 import {
+  GENERATED_MANIFEST_FILENAME,
   createUserDesignSystem,
   deleteUserDesignSystem,
   linkUserDesignSystemProject,
@@ -56,6 +57,7 @@ import {
   hashBundleContent,
   planBundleMirror,
   readBundleTarget,
+  recordBundleFiles,
   type BundleFile,
   type BundlePlan,
 } from './preserve.js';
@@ -378,6 +380,10 @@ export async function startBrandExtraction(
           ? { workspaceId: opts.designSystemWorkspaceId.trim() }
           : {}),
       });
+      // The draft's placeholder DESIGN.md is generator output: fingerprint it
+      // so the first finalize replaces it unless the user edits it first.
+      const draftDir = userDesignSystemDir(opts.userDesignSystemsRoot, draft.id);
+      if (draftDir) recordBundleFiles(draftDir, ['DESIGN.md']);
       draftDesignSystemId = draft.id;
       meta.designSystemId = draft.id;
       patchMeta(brandsRoot, id, { designSystemId: draft.id });
@@ -1481,8 +1487,23 @@ async function finalizeBrandCore(opts: FinalizeBrandCoreOptions): Promise<BrandF
     ? userDesignSystemDir(userDesignSystemsRoot, meta.designSystemId)
     : null;
   const priorDesignMd = linkedDir ? readBundleTarget(linkedDir, 'DESIGN.md') : undefined;
+  // A draft registered before its placeholder was fingerprinted has no
+  // manifest. Until a finalize has completed for the brand, its DESIGN.md is
+  // still that placeholder rather than a hand edit, so plan it as absent. A
+  // brand.json a stopped finalize left behind does not change that.
+  const holdsDraftDesignMd = linkedDir !== null
+    && priorDesignMd instanceof Buffer
+    && meta.systemFiles === undefined
+    && readBundleTarget(linkedDir, GENERATED_MANIFEST_FILENAME) === undefined;
   const linkedPlan = linkedDir && priorDesignMd !== undefined
-    ? await planDesignSystemMirror(linkedDir, brandsRoot, id, body, baseline)
+    ? await planDesignSystemMirror(
+      linkedDir,
+      brandsRoot,
+      id,
+      body,
+      baseline,
+      holdsDraftDesignMd ? { 'DESIGN.md': undefined } : undefined,
+    )
     : null;
   const keptDesignMd =
     linkedPlan?.kept.includes('DESIGN.md') && priorDesignMd instanceof Buffer ? priorDesignMd : undefined;

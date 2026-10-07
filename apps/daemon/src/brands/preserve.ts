@@ -63,6 +63,25 @@ export function readBundleTarget(root: string, rel: string): BundleTargetState {
 }
 
 /**
+ * Fingerprint files the daemon just wrote into a fresh `dir`, so the first
+ * mirror treats them as generator output and replaces them unless edited.
+ */
+export function recordBundleFiles(dir: string, rels: string[]): void {
+  if (readBundleTarget(dir, GENERATED_MANIFEST_FILENAME) !== undefined) return;
+  const manifest: Record<string, string> = {};
+  for (const rel of rels) {
+    const content = readBundleTarget(dir, rel);
+    if (content instanceof Buffer) manifest[rel] = hashBundleContent(content);
+  }
+  if (Object.keys(manifest).length === 0) return;
+  fs.writeFileSync(
+    path.join(dir, GENERATED_MANIFEST_FILENAME),
+    serializeGeneratedManifest(manifest),
+    'utf8',
+  );
+}
+
+/**
  * Decide what a finalize may write into `dir`. `baseline` fingerprints the
  * brand workspace as it stood before this finalize, which is exactly what the
  * previous finalize mirrored; it stands in for the manifest on targets written
