@@ -67,10 +67,12 @@ function isCrossAppImportAllowlisted(repositoryPath: string, specifier: string):
 }
 
 // A prefilter may skip parsing only when escaped spellings cannot hide a
-// registered app name. Unicode, hex, and line-continuation escapes always fall
-// back; removing slashes covers identity escapes such as `\d\a\e\m\o\n`.
+// registered app name. Unicode, hex, and legacy octal escapes always fall back,
+// and so do line continuations on any ECMAScript line terminator (LF, CR, LS,
+// PS); removing slashes covers identity escapes such as `\daemon`.
 function hasPotentiallyEscapedLiteral(source: string, markers: readonly string[]): boolean {
-  if (source.includes("\\u") || source.includes("\\x") || /\\\r?\n/.test(source)) return true;
+  if (source.includes("\\u") || source.includes("\\x") || /\\[0-7]/.test(source)) return true;
+  if (/\\(?:\r\n|[\r\n\u2028\u2029])/.test(source)) return true;
   if (!source.includes("\\")) return false;
   const unescapedSource = source.replaceAll("\\", "");
   return markers.some((marker) => unescapedSource.includes(marker));
